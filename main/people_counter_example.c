@@ -187,8 +187,8 @@ void app_main(void) {
     people_counter_config_t pc_config = PEOPLE_COUNTER_DEFAULT_CONFIG();
     pc_config.vector_threshold = 1000;          // 100cm movement to count as entry/exit
     pc_config.empty_target_threshold = 5;      // 5 empty frames to consider target gone
-    pc_config.detection_min_x = -2000;         // Detection area: 4m wide, 2m deep
-    pc_config.detection_max_x = 2000;
+    pc_config.detection_min_x = -2000;         // Internal detection area: 4m wide, 2m deep
+    pc_config.detection_max_x = 2000;          // (does not configure radar hardware)
     pc_config.detection_min_y = 0;
     pc_config.detection_max_y = 2000;
     pc_config.count_changed_cb = count_changed_cb;

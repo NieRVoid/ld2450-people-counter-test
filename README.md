@@ -76,12 +76,14 @@ The people counter can be configured using the `people_counter_config_t` structu
 |-----------|-------------|---------------|
 | `vector_threshold` | X-axis movement required to count entry/exit (mm) | 1500 (150cm) |
 | `empty_target_threshold` | Number of empty reports before target is considered gone | 10 |
-| `detection_min_x` | Minimum X-coordinate of detection area (mm) | -1500 (-150cm) |
-| `detection_max_x` | Maximum X-coordinate of detection area (mm) | 1500 (150cm) |
-| `detection_min_y` | Minimum Y-coordinate of detection area (mm) | 0 |
-| `detection_max_y` | Maximum Y-coordinate of detection area (mm) | 2000 (200cm) |
+| `detection_min_x` | Minimum X-coordinate of detection area (mm) - internal filtering only | -1500 (-150cm) |
+| `detection_max_x` | Maximum X-coordinate of detection area (mm) - internal filtering only | 1500 (150cm) |
+| `detection_min_y` | Minimum Y-coordinate of detection area (mm) - internal filtering only | 0 |
+| `detection_max_y` | Maximum Y-coordinate of detection area (mm) - internal filtering only | 2000 (200cm) |
 | `count_changed_cb` | Callback function pointer for count changes | NULL |
 | `user_context` | User context passed to callback | NULL |
+
+> **Note:** The detection area parameters are used only for internal target filtering within the component and do not configure the radar hardware's region filtering capabilities.
 
 ### Reading Count Values
 
@@ -154,6 +156,10 @@ The people counter component uses a vector-based approach to detect entries and 
 3. When the vector exceeds the configured threshold:
    - If the vector is positive (moving right), an entry is counted
    - If the vector is negative (moving left), an exit is counted
+
+### Target Filtering
+
+The component internally filters targets based on the configured detection area parameters. Only targets within this area will be tracked for entries and exits. This filtering happens in software and does not rely on the radar hardware's region filtering capabilities.
 
 ### Target Tracking
 
