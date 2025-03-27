@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "esp_timer.h" // Added for timestamp handling
 
 static const char *TAG = "PEOPLE_COUNTER";
 
@@ -88,9 +89,6 @@ esp_err_t people_counter_init(const people_counter_config_t *config)
         vSemaphoreDelete(s_pc_context.mutex);
         return ret;
     }
-
-    // No longer configure detection regions for the radar
-    // Let radar report all targets and filter internally
 
     s_pc_context.initialized = true;
     ESP_LOGI(TAG, "People counter initialized with vector threshold: %d mm", config->vector_threshold);
@@ -367,6 +365,9 @@ static void radar_data_callback(const ld2450_frame_t *frame, void *ctx)
         return;
     }
 
+    // Get current timestamp since the LD2450 frame doesn't include it
+    int64_t current_timestamp = esp_timer_get_time();
+
     // Process each target in the frame
     for (int i = 0; i < 3; i++) {
         pc_target_t *target = &s_pc_context.targets[i];
@@ -385,7 +386,8 @@ static void radar_data_callback(const ld2450_frame_t *frame, void *ctx)
                 target->active = true;
                 target->initial_x = radar_target->x;
                 target->current_x = radar_target->x;
-                target->first_seen_time = frame->timestamp;
+                target->first_seen_time = current_timestamp;
+                target->last_update_time = current_timestamp;
                 target->counted = false;
                 target->empty_count = 0;
                 target->vector_length = 0;
@@ -395,7 +397,7 @@ static void radar_data_callback(const ld2450_frame_t *frame, void *ctx)
             } else {
                 // Update target position
                 target->current_x = radar_target->x;
-                target->last_update_time = frame->timestamp;
+                target->last_update_time = current_timestamp;
                 target->empty_count = 0;
                 
                 // Process movement for entry/exit detection

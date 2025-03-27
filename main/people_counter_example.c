@@ -29,10 +29,15 @@ static const char *TAG = "PC_EXAMPLE";
 #define BUTTON_DEBOUNCE_TIME_MS   50
 #define DOUBLE_PRESS_INTERVAL_MS  500
 
+// Display intervals
+#define RADAR_DISPLAY_INTERVAL_US    5000000  // 5 seconds in microseconds
+#define RESOURCE_DISPLAY_INTERVAL_US 30000000 // 30 seconds in microseconds
+
 // Global variables for button state and program control
 static volatile bool g_exit_app = false;
 static int64_t g_last_button_press = 0;
 static int64_t g_last_frame_time = 0;
+static int64_t g_last_resource_display_time = 0;
 
 // GPIO interrupt handler
 static void IRAM_ATTR button_isr_handler(void* arg) {
@@ -102,19 +107,50 @@ void print_error_debug_info(void) {
     }
 }
 
-// Simplified callback function that doesn't duplicate logging functionality
+// Callback function to handle radar detection data
 static void radar_data_callback(const ld2450_frame_t *frame, void *user_ctx) {
     if (!frame) return;
     
-    // Just update the last frame time
-    g_last_frame_time = frame->timestamp;
+    int64_t current_time = esp_timer_get_time();
     
-    // Optional: Track target count changes (as a simple example of application logic)
-    static int prev_target_count = -1;
-    if (frame->count != prev_target_count) {
-        ESP_LOGI(TAG, "Target count changed: %d → %d", prev_target_count, frame->count);
-        prev_target_count = frame->count;
+    // Only print radar data every 5 seconds
+    if (current_time - g_last_radar_display_time >= RADAR_DISPLAY_INTERVAL_US) {
+        ESP_LOGI(TAG, "---------- Radar Data Frame ----------");
+        ESP_LOGI(TAG, "Number of targets detected: %d", frame->count);
+        
+        for (int i = 0; i < frame->count; i++) {
+            const ld2450_target_t *target = &frame->targets[i];
+            if (target->valid) {
+                ESP_LOGI(TAG, "Target #%d:", i + 1);
+                ESP_LOGI(TAG, "  Position:   (%d, %d) mm", target->x, target->y);
+                ESP_LOGI(TAG, "  Distance:   %.2f mm", target->distance);
+                ESP_LOGI(TAG, "  Angle:      %.1f°", target->angle);
+                ESP_LOGI(TAG, "  Speed:      %d cm/s", target->speed);
+                ESP_LOGI(TAG, "  Resolution: %d mm", target->resolution);
+            }
+        }
+        ESP_LOGI(TAG, "--------------------------------------\n");
+        
+        // Update last display time
+        g_last_radar_display_time = current_time;
     }
+    
+    // Check if it's time to display resource information (every 30 seconds)
+    if (current_time - g_last_resource_display_time >= RESOURCE_DISPLAY_INTERVAL_US) {
+        // Print all system resources using the updated comprehensive function
+        esp_err_t ret = resource_monitor_print_comprehensive();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to print resource stats: %s", esp_err_to_name(ret));
+        }
+        
+        // Update last resource display time
+        g_last_resource_display_time = current_time;
+    }
+}
+
+void print_mac_address(uint8_t mac[6]) {
+    ESP_LOGI(TAG, "MAC Address: %02X:%02X:%02X:%02X:%02X:%02X", 
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 void print_region_filter(ld2450_filter_type_t type, ld2450_region_t regions[3]) {
@@ -142,7 +178,15 @@ static void count_changed_cb(int count, int entries, int exits, void *ctx)
 }
 
 void app_main(void) {
-    ESP_LOGI(TAG, "Starting LD2450 Radar Test");
+    ESP_LOGI(TAG, "Starting People Counter Example");
+
+    // Initialize resource monitor
+    esp_err_t ret = resource_monitor_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize resource monitor! Error: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Resource monitor initialized successfully");
+    }
     
     // Configure GPIO for boot button
     gpio_config_t io_conf = {
@@ -172,16 +216,14 @@ void app_main(void) {
     ESP_LOGI(TAG, "  TX Pin: GPIO%d", config.uart_tx_pin);
     ESP_LOGI(TAG, "  Baud Rate: %lu", config.uart_baud_rate);
     ESP_LOGI(TAG, "  Auto Processing: %s", config.auto_processing ? "Enabled" : "Disabled");
-    ESP_LOGI(TAG, "  Log Level: %d (VERBOSE)", config.log_level);
-    ESP_LOGI(TAG, "  Data Log Interval: %lu ms", config.data_log_interval_ms);
     
-    esp_err_t ret = ld2450_init(&config);
+    ret = ld2450_init(&config);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize LD2450! Error: %s", esp_err_to_name(ret));
         print_error_debug_info();
         return;
     }
-    ESP_LOGI(TAG, "LD2450 initialized successfully");
+    ESP_LOGI(TAG, "LD2450 driver initialized successfully");
     
     // Initialize the people counter module
     people_counter_config_t pc_config = PEOPLE_COUNTER_DEFAULT_CONFIG();
