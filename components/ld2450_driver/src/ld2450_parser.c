@@ -12,7 +12,6 @@
 
 #include <string.h>
 #include <math.h>
-#include "esp_timer.h"
 #include "ld2450.h"
 #include "ld2450_private.h"
 #include "esp_log.h"
@@ -68,10 +67,6 @@ static bool parse_target(const uint8_t *target_data, ld2450_target_t *target)
     
     target->valid = true;
     
-    // Add debug logging for the example in the documentation
-    ESP_LOGD(TAG, "Target data: X=%04X (%d mm), Y=%04X (%d mm), Speed=%04X (%d cm/s), Resolution=%u mm", 
-             x_raw, target->x, y_raw, target->y, speed_raw, target->speed, target->resolution);
-    
     return true;
 }
 
@@ -100,9 +95,6 @@ esp_err_t ld2450_parse_frame(const uint8_t *data, size_t len, ld2450_frame_t *fr
     // Reset target count
     frame->count = 0;
     
-    // Get current timestamp
-    frame->timestamp = esp_timer_get_time();
-    
     // Parse up to 3 targets
     for (int i = 0; i < 3; i++) {
         // Target data starts at offset 4 and each target data segment is 8 bytes
@@ -116,8 +108,6 @@ esp_err_t ld2450_parse_frame(const uint8_t *data, size_t len, ld2450_frame_t *fr
             memset(&frame->targets[i], 0, sizeof(ld2450_target_t));
         }
     }
-    
-    ESP_LOGD(TAG, "Parsed frame with %d targets", frame->count);
     
     return ESP_OK;
 }
@@ -154,16 +144,6 @@ esp_err_t ld2450_handle_data_frame(const uint8_t *data, size_t len)
     if (ret != ESP_OK) {
         return ret;
     }
-    
-    // Store the latest frame for logging purposes
-    if (xSemaphoreTake(instance->mutex, 0) == pdTRUE) {
-        instance->last_frame = frame;
-        instance->last_frame_valid = true;
-        xSemaphoreGive(instance->mutex);
-    }
-    
-    // Log the frame periodically based on configuration
-    ld2450_log_radar_frame(&frame, false);
     
     // Call the callback if registered - minimize mutex protected region
     if (instance->target_callback != NULL) {

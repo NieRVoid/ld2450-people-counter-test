@@ -56,18 +56,6 @@ typedef enum {
 } ld2450_filter_type_t;
 
 /**
- * @brief Log verbosity levels for the LD2450 driver
- */
-typedef enum {
-    LD2450_LOG_NONE = 0,      /*!< No logging */
-    LD2450_LOG_ERRORS,        /*!< Log errors only */
-    LD2450_LOG_WARNINGS,      /*!< Log warnings and errors */
-    LD2450_LOG_INFO,          /*!< Log info, warnings, and errors */
-    LD2450_LOG_DEBUG,         /*!< Log debug, info, warnings, and errors */
-    LD2450_LOG_VERBOSE        /*!< Log everything including radar data */
-} ld2450_log_level_t;
-
-/**
  * @brief Firmware version information
  */
 typedef struct {
@@ -105,7 +93,6 @@ typedef struct {
 typedef struct {
     ld2450_target_t targets[3];  /*!< Data for up to 3 targets */
     uint8_t count;               /*!< Number of valid targets (0-3) */
-    int64_t timestamp;           /*!< ESP timestamp when data was received */
 } ld2450_frame_t;
 
 /**
@@ -118,8 +105,6 @@ typedef struct {
     uint32_t uart_baud_rate;    /*!< UART baud rate */
     bool auto_processing;       /*!< Enable automatic frame processing */
     int task_priority;          /*!< Priority for auto processing task (if enabled) */
-    ld2450_log_level_t log_level;  /*!< Logging verbosity level */
-    uint32_t data_log_interval_ms; /*!< Interval between radar data logs (ms) */
 } ld2450_config_t;
 
 /**
@@ -142,8 +127,6 @@ typedef void (*ld2450_target_cb_t)(const ld2450_frame_t *frame, void *user_ctx);
     .uart_baud_rate = 256000, \
     .auto_processing = true, \
     .task_priority = 5, \
-    .log_level = LD2450_LOG_INFO, \
-    .data_log_interval_ms = 5000, \
 }
 
 /**
@@ -281,37 +264,6 @@ esp_err_t ld2450_get_region_filter(ld2450_filter_type_t *type, ld2450_region_t r
  * @return esp_err_t ESP_OK on success, error code otherwise
  */
 esp_err_t ld2450_get_last_error_data(uint8_t *buffer, size_t buffer_size, size_t *length);
-
-/**
- * @brief Set log verbosity level
- * 
- * @param level New log level
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-esp_err_t ld2450_set_log_level(ld2450_log_level_t level);
-
-/**
- * @brief Get current log verbosity level
- * 
- * @param level Pointer to store current log level
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-esp_err_t ld2450_get_log_level(ld2450_log_level_t *level);
-
-/**
- * @brief Set interval between radar data logs
- * 
- * @param interval_ms Interval in milliseconds (0 to disable periodic logging)
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-esp_err_t ld2450_set_data_log_interval(uint32_t interval_ms);
-
-/**
- * @brief Log current radar frame data (can be called anytime)
- * 
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-esp_err_t ld2450_log_frame_data(void);
 
 #ifdef __cplusplus
 }

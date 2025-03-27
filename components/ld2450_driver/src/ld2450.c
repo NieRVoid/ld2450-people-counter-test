@@ -20,7 +20,6 @@
 #include "ld2450_private.h"
 #include "esp_log.h"
 #include "driver/uart.h"
-#include "esp_timer.h"
 
 static const char *TAG = LD2450_LOG_TAG;
 
@@ -66,12 +65,6 @@ esp_err_t ld2450_init(const ld2450_config_t *config)
     instance->tx_pin = config->uart_tx_pin;
     instance->baud_rate = config->uart_baud_rate;
     instance->auto_processing = config->auto_processing;
-    
-    // Initialize logging configuration
-    instance->log_level = config->log_level;
-    instance->data_log_interval_ms = config->data_log_interval_ms;
-    instance->last_data_log_time = 0;
-    instance->last_frame_valid = false;
     
     // Create mutex for thread safety
     instance->mutex = xSemaphoreCreateMutex();
@@ -340,177 +333,6 @@ void ld2450_processing_task(void *arg)
     
     ESP_LOGI(TAG, "LD2450 processing task stopped");
     vTaskDelete(NULL);
-}
-
-/**
- * @brief Format and log a radar data frame based on current log level
- * 
- * @param frame Pointer to frame data to log
- * @param force Force logging regardless of interval
- */
-void ld2450_log_radar_frame(const ld2450_frame_t *frame, bool force)
-{
-    ld2450_state_t *instance = ld2450_get_instance();
-    
-    if (!instance || !instance->initialized || !frame) {
-        return;
-    }
-    
-    // Check if logging is enabled
-    if (instance->log_level < LD2450_LOG_VERBOSE && !force) {
-        return;
-    }
-    
-    // Check interval if not forced
-    if (!force) {
-        int64_t current_time = esp_timer_get_time() / 1000; // Convert to ms
-        if ((current_time - instance->last_data_log_time) < instance->data_log_interval_ms) {
-            return;
-        }
-        instance->last_data_log_time = current_time;
-    }
-    
-    // Log frame data
-    ESP_LOGI(TAG, "--- RADAR FRAME DATA [t=%lld] ---", frame->timestamp / 1000);
-    ESP_LOGI(TAG, "Targets detected: %d", frame->count);
-    
-    // mm
-    for (int i = 0; i < frame->count; i++) {
-        const ld2450_target_t *target = &frame->targets[i];
-        if (target->valid) {
-            ESP_LOGI(TAG, "Target #%d: pos=(%d,%d)mm dist=%dmm angle=%.1f° speed=%dcm/s res=%dmm", 
-                     i + 1, 
-                     target->x, target->y,
-                     (int)(target->distance),
-                     target->angle, 
-                     target->speed,                   // cm/s
-                     target->resolution);
-        }
-    }
-    
-    // // cm
-    // for (int i = 0; i < frame->count; i++) {
-    //     const ld2450_target_t *target = &frame->targets[i];
-    //     if (target->valid) {
-    //         ESP_LOGI(TAG, "Target #%d: pos=(%d,%d)cm dist=%dcm angle=%.1f° speed=%dcm/s res=%dmm", 
-    //                  i + 1, 
-    //                  target->x / 10, target->y / 10,  // Convert mm to cm
-    //                  (int)(target->distance / 10),    // Convert mm to cm without decimals
-    //                  target->angle, 
-    //                  target->speed,                   // Already in cm/s
-    //                  target->resolution);             // Keep in mm
-    //     }
-    // }
-    
-    ESP_LOGI(TAG, "-------------------------------");
-}
-
-/**
- * @brief Set log verbosity level
- * 
- * @param level New log level
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-esp_err_t ld2450_set_log_level(ld2450_log_level_t level)
-{
-    ld2450_state_t *instance = ld2450_get_instance();
-    
-    if (!instance || !instance->initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (level > LD2450_LOG_VERBOSE) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    if (xSemaphoreTake(instance->mutex, portMAX_DELAY) == pdTRUE) {
-        instance->log_level = level;
-        xSemaphoreGive(instance->mutex);
-        
-        ESP_LOGI(TAG, "Log level set to %d", level);
-        return ESP_OK;
-    }
-    
-    return ESP_FAIL;
-}
-
-/**
- * @brief Get current log verbosity level
- * 
- * @param level Pointer to store current log level
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-esp_err_t ld2450_get_log_level(ld2450_log_level_t *level)
-{
-    ld2450_state_t *instance = ld2450_get_instance();
-    
-    if (!instance || !instance->initialized || !level) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    if (xSemaphoreTake(instance->mutex, portMAX_DELAY) == pdTRUE) {
-        *level = instance->log_level;
-        xSemaphoreGive(instance->mutex);
-        return ESP_OK;
-    }
-    
-    return ESP_FAIL;
-}
-
-/**
- * @brief Set interval between radar data logs
- * 
- * @param interval_ms Interval in milliseconds (0 to disable periodic logging)
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-esp_err_t ld2450_set_data_log_interval(uint32_t interval_ms)
-{
-    ld2450_state_t *instance = ld2450_get_instance();
-    
-    if (!instance || !instance->initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (xSemaphoreTake(instance->mutex, portMAX_DELAY) == pdTRUE) {
-        instance->data_log_interval_ms = interval_ms;
-        xSemaphoreGive(instance->mutex);
-        
-        ESP_LOGI(TAG, "Data log interval set to %" PRIu32 " ms", interval_ms);
-        return ESP_OK;
-    }
-    
-    return ESP_FAIL;
-}
-
-/**
- * @brief Log current radar frame data (can be called anytime)
- * 
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-esp_err_t ld2450_log_frame_data(void)
-{
-    ld2450_state_t *instance = ld2450_get_instance();
-    
-    if (!instance || !instance->initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (xSemaphoreTake(instance->mutex, portMAX_DELAY) == pdTRUE) {
-        if (instance->last_frame_valid) {
-            ld2450_frame_t frame_copy = instance->last_frame;
-            xSemaphoreGive(instance->mutex);
-            
-            // Log the frame with force=true to bypass interval check
-            ld2450_log_radar_frame(&frame_copy, true);
-            return ESP_OK;
-        } else {
-            xSemaphoreGive(instance->mutex);
-            ESP_LOGW(TAG, "No radar frame available to log");
-            return ESP_ERR_NOT_FOUND;
-        }
-    }
-    
-    return ESP_FAIL;
 }
 
 /* 

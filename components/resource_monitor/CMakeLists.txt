@@ -1,0 +1,16 @@
+idf_component_register(
+    SRCS
+        "src/resource_monitor.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_INCLUDE_DIRS
+        "src"
+    REQUIRES
+        esp_common
+        freertos
+        heap
+        esp_hw_support
+        spiffs
+        vfs
+        fatfs
+)
