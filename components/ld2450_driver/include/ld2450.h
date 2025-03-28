@@ -6,10 +6,12 @@
  * implementing the official communication protocol with emphasis on static memory 
  * allocation and efficient data handling.
  * 
+ * Supports single-producer, multi-consumer architecture using a circular buffer.
+ * 
  * @note This driver is compatible with ESP-IDF v5.4 and later.
  * 
  * @author NieRVoid
- * @date 2025-03-12
+ * @date 2025-03-15
  * @license MIT
  */
 
@@ -75,25 +77,21 @@ typedef struct {
 } ld2450_region_t;
 
 /**
- * @brief Target information structure
+ * @brief Target information structure (5 bytes per target)
  */
 typedef struct {
     int16_t x;                /*!< X coordinate (mm) */
     int16_t y;                /*!< Y coordinate (mm) */
-    int16_t speed;            /*!< Speed (cm/s) */
-    uint16_t resolution;      /*!< Distance resolution (mm) */
-    float distance;           /*!< Calculated distance (mm) */
-    float angle;              /*!< Calculated angle in degrees */
-    bool valid;               /*!< Target validity flag */
-} ld2450_target_t;
+    int8_t speed;             /*!< Speed compressed to int8_t (relative scale, cm/s) */
+} __attribute__((packed)) ld2450_target_t;
 
 /**
- * @brief Data frame structure containing target information
+ * @brief Data frame structure containing target information (16 bytes total)
  */
 typedef struct {
-    ld2450_target_t targets[3];  /*!< Data for up to 3 targets */
-    uint8_t count;               /*!< Number of valid targets (0-3) */
-} ld2450_frame_t;
+    ld2450_target_t targets[3]; /*!< Data for up to 3 targets (15 bytes) */
+    uint8_t valid_mask;        /*!< Bit mask of valid targets (1 bit per target) */
+} __attribute__((packed)) ld2450_frame_t;
 
 /**
  * @brief Driver configuration structure
@@ -108,14 +106,9 @@ typedef struct {
 } ld2450_config_t;
 
 /**
- * @brief Target data callback function type
- * 
- * This function is called when new target data is available
- * 
- * @param frame Pointer to the frame containing target data
- * @param user_ctx User context pointer passed during registration
+ * @brief Consumer handle type (opaque type for consumers)
  */
-typedef void (*ld2450_target_cb_t)(const ld2450_frame_t *frame, void *user_ctx);
+typedef uint32_t ld2450_consumer_handle_t;
 
 /**
  * @brief Default configuration for the LD2450 driver
@@ -145,13 +138,50 @@ esp_err_t ld2450_init(const ld2450_config_t *config);
 esp_err_t ld2450_deinit(void);
 
 /**
- * @brief Register a callback function for target data
+ * @brief Register as a consumer of radar data
  * 
- * @param callback Function pointer to call when new target data is available
- * @param user_ctx User context pointer passed to the callback function
+ * This registers the current task as a consumer of radar frame data.
+ * The task will receive notifications when new frames are available.
+ * 
+ * @param[out] handle Pointer to store the consumer handle
  * @return esp_err_t ESP_OK on success, error code otherwise
  */
-esp_err_t ld2450_register_target_callback(ld2450_target_cb_t callback, void *user_ctx);
+esp_err_t ld2450_register_consumer(ld2450_consumer_handle_t *handle);
+
+/**
+ * @brief Unregister as a consumer of radar data
+ * 
+ * @param handle Consumer handle to unregister
+ * @return esp_err_t ESP_OK on success, error code otherwise
+ */
+esp_err_t ld2450_unregister_consumer(ld2450_consumer_handle_t handle);
+
+/**
+ * @brief Wait for a new radar frame
+ * 
+ * This function blocks until a new frame is available or the timeout expires.
+ * The consumer manages its own state regarding which frames have been read.
+ * 
+ * @param handle Consumer handle
+ * @param[out] frame Pointer to store the frame data
+ * @param timeout_ms Timeout in milliseconds, or portMAX_DELAY to wait indefinitely
+ * @return esp_err_t ESP_OK on success, ESP_ERR_TIMEOUT on timeout, error code otherwise
+ */
+esp_err_t ld2450_wait_for_frame(ld2450_consumer_handle_t handle, 
+                               ld2450_frame_t *frame, 
+                               uint32_t timeout_ms);
+
+/**
+ * @brief Get the latest radar frame without waiting
+ * 
+ * This function returns immediately with the latest frame available in the buffer.
+ * 
+ * @param handle Consumer handle
+ * @param[out] frame Pointer to store the frame data
+ * @return esp_err_t ESP_OK on success, ESP_ERR_NOT_FOUND if no frame available, error code otherwise
+ */
+esp_err_t ld2450_get_latest_frame(ld2450_consumer_handle_t handle, 
+                                 ld2450_frame_t *frame);
 
 /**
  * @brief Process a radar data frame manually

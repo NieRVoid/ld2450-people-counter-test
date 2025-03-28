@@ -5,7 +5,7 @@ idf_component_register(
         "src/ld2450.c"
         "src/ld2450_config.c"
         "src/ld2450_parser.c"
-        "src/ld2450_private.h"
+        "src/ld2450_circular_buffer.c"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS

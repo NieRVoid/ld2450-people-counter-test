@@ -82,16 +82,6 @@ esp_err_t people_counter_deinit(void);
 esp_err_t people_counter_update_config(const people_counter_config_t *config);
 
 /**
- * @brief Configure detection region for radar
- * 
- * @note This function only affects the internal filtering of targets and
- *       does not configure the LD2450 radar hardware region filtering
- * 
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-esp_err_t people_counter_configure_region(void);
-
-/**
  * @brief Get current people count (number of people in the room)
  * 
  * @return int Current count (negative if more exits than entries)

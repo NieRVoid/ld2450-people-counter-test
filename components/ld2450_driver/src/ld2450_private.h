@@ -7,7 +7,7 @@
  * by applications.
  * 
  * @author NieRVoid
- * @date 2025-03-12
+ * @date 2025-03-15
  * @license MIT
  */
 
@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "ld2450.h"
+#include "ld2450_circular_buffer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -127,10 +128,8 @@ typedef struct {
     bool initialized;
     /** @brief Auto-processing enabled flag */
     bool auto_processing;
-    /** @brief Target data callback function */
-    ld2450_target_cb_t target_callback;
-    /** @brief User context for callback */
-    void *user_ctx;
+    /** @brief Circular buffer for multi-consumer data sharing */
+    ld2450_circular_buffer_t circular_buffer;
     /** @brief Processing task handle */
     TaskHandle_t task_handle;
     /** @brief UART event queue */

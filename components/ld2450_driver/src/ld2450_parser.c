@@ -6,7 +6,7 @@
  * extracting target information and calculating derived metrics.
  * 
  * @author NieRVoid
- * @date 2025-03-12
+ * @date 2025-03-15
  * @license MIT
  */
 
@@ -14,11 +14,32 @@
 #include <math.h>
 #include "ld2450.h"
 #include "ld2450_private.h"
+#include "ld2450_circular_buffer.h"
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
 static const char *TAG = LD2450_LOG_TAG;
+
+/**
+ * @brief Compress a raw speed value (int16_t) to a scaled int8_t representation
+ * 
+ * Maps the original speed value to int8_t range using the formula: 
+ * (magnitude >> 3) + (magnitude >> 5) to approximate (magnitude * 128) / 1000
+ * 
+ * @param speed_raw Original speed value from radar
+ * @return int8_t Compressed speed value
+ */
+static inline int8_t compress_speed(uint16_t speed_raw) {
+    // Extract the 15-bit magnitude
+    int16_t magnitude = speed_raw & 0x7FFF;
+    
+    // Apply the compression formula: ~= (magnitude * 128) / 1000
+    int8_t compressed = (magnitude >> 3) + (magnitude >> 5);
+    
+    // Apply sign based on MSB of original value
+    return (speed_raw & 0x8000) ? compressed : -compressed;
+}
 
 /**
  * @brief Parse target data from a data segment within a frame
@@ -32,7 +53,6 @@ static bool parse_target(const uint8_t *target_data, ld2450_target_t *target)
     // Check if target segment is empty (all zeros) using faster 32-bit checks
     uint32_t *data32 = (uint32_t*)target_data;
     if (data32[0] == 0 && data32[1] == 0) {
-        target->valid = false;
         return false;
     }
     
@@ -43,29 +63,19 @@ static bool parse_target(const uint8_t *target_data, ld2450_target_t *target)
     uint16_t y_raw = target_data[2] | (target_data[3] << 8);
     // Speed (little-endian)
     uint16_t speed_raw = target_data[4] | (target_data[5] << 8);
-    // Distance resolution (little-endian)
-    uint16_t dist_res_raw = target_data[6] | (target_data[7] << 8);
     
     // Convert coordinates according to protocol
     // For X, Y, Speed: MSB 1 indicates positive, 0 indicates negative
     // Handle the 15-bit magnitude with proper sign
     int16_t x_magnitude = x_raw & 0x7FFF;  // Mask off MSB to get magnitude (15 bits)
     int16_t y_magnitude = y_raw & 0x7FFF;  // Mask off MSB to get magnitude (15 bits)
-    int16_t speed_magnitude = speed_raw & 0x7FFF; // Mask off MSB to get magnitude (15 bits)
     
     // Apply sign based on MSB
     target->x = (target_data[1] & 0x80) ? x_magnitude : -x_magnitude;
     target->y = (target_data[3] & 0x80) ? y_magnitude : -y_magnitude;
-    target->speed = (target_data[5] & 0x80) ? speed_magnitude : -speed_magnitude;
     
-    // Distance resolution is used directly
-    target->resolution = dist_res_raw;
-    
-    // Always calculate derived values
-    target->distance = sqrt(target->x * target->x + target->y * target->y);
-    target->angle = -atan2((float)target->x, (float)target->y) * (180.0f / M_PI);
-    
-    target->valid = true;
+    // Compress speed to int8_t using custom compression formula
+    target->speed = compress_speed(speed_raw);
     
     return true;
 }
@@ -92,8 +102,8 @@ esp_err_t ld2450_parse_frame(const uint8_t *data, size_t len, ld2450_frame_t *fr
         return ESP_ERR_INVALID_STATE;
     }
     
-    // Reset target count
-    frame->count = 0;
+    // Reset valid mask
+    frame->valid_mask = 0;
     
     // Parse up to 3 targets
     for (int i = 0; i < 3; i++) {
@@ -102,7 +112,8 @@ esp_err_t ld2450_parse_frame(const uint8_t *data, size_t len, ld2450_frame_t *fr
         
         // Parse target data
         if (parse_target(target_data, &frame->targets[i])) {
-            frame->count++;
+            // Set the corresponding bit in the valid mask
+            frame->valid_mask |= (1 << i);
         } else {
             // Clear the target data for invalid targets
             memset(&frame->targets[i], 0, sizeof(ld2450_target_t));
@@ -116,7 +127,7 @@ esp_err_t ld2450_parse_frame(const uint8_t *data, size_t len, ld2450_frame_t *fr
  * @brief Handle a complete data frame
  * 
  * This function processes a complete data frame, parses it, and delivers
- * the results to the registered callback if any.
+ * the results to the circular buffer for consumers.
  * 
  * @param data Frame data
  * @param len Frame length
@@ -145,16 +156,8 @@ esp_err_t ld2450_handle_data_frame(const uint8_t *data, size_t len)
         return ret;
     }
     
-    // Call the callback if registered - minimize mutex protected region
-    if (instance->target_callback != NULL) {
-        // Create a local copy of the frame before calling callback
-        ld2450_frame_t frame_copy = frame;
-        
-        // Call callback outside of any mutex lock
-        instance->target_callback(&frame_copy, instance->user_ctx);
-    }
-    
-    return ESP_OK;
+    // Write frame to circular buffer for multi-consumer access
+    return ld2450_circular_buffer_write(&instance->circular_buffer, &frame);
 }
 
 /**

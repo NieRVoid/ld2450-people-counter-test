@@ -6,7 +6,7 @@
  * including initialization, deinitialization, and core operations.
  * 
  * @author NieRVoid
- * @date 2025-03-12
+ * @date 2025-03-15
  * @license MIT
  */
 
@@ -18,6 +18,7 @@
 #include "freertos/semphr.h"
 #include "ld2450.h"
 #include "ld2450_private.h"
+#include "ld2450_circular_buffer.h"
 #include "esp_log.h"
 #include "driver/uart.h"
 
@@ -38,9 +39,6 @@ ld2450_state_t *ld2450_get_instance(void)
 
 /**
  * @brief Initialize the LD2450 radar driver
- * 
- * @param config Pointer to driver configuration structure
- * @return esp_err_t ESP_OK on success, error code otherwise
  */
 esp_err_t ld2450_init(const ld2450_config_t *config)
 {
@@ -66,10 +64,19 @@ esp_err_t ld2450_init(const ld2450_config_t *config)
     instance->baud_rate = config->uart_baud_rate;
     instance->auto_processing = config->auto_processing;
     
+    // Initialize circular buffer
+    ret = ld2450_circular_buffer_init(&instance->circular_buffer);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize circular buffer: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
     // Create mutex for thread safety
     instance->mutex = xSemaphoreCreateMutex();
     if (!instance->mutex) {
         ESP_LOGE(TAG, "Failed to create mutex");
+        // Clean up circular buffer that was successfully initialized
+        ld2450_circular_buffer_deinit(&instance->circular_buffer);
         return ESP_ERR_NO_MEM;
     }
     
@@ -88,8 +95,7 @@ esp_err_t ld2450_init(const ld2450_config_t *config)
                               0, 20, &instance->uart_queue, 0);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to install UART driver: %s", esp_err_to_name(ret));
-        vSemaphoreDelete(instance->mutex);
-        return ret;
+        goto cleanup;
     }
     
     // Configure UART parameters
@@ -97,8 +103,7 @@ esp_err_t ld2450_init(const ld2450_config_t *config)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to configure UART parameters: %s", esp_err_to_name(ret));
         uart_driver_delete(config->uart_port);
-        vSemaphoreDelete(instance->mutex);
-        return ret;
+        goto cleanup;
     }
     
     // Set UART pins
@@ -107,8 +112,7 @@ esp_err_t ld2450_init(const ld2450_config_t *config)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set UART pins: %s", esp_err_to_name(ret));
         uart_driver_delete(config->uart_port);
-        vSemaphoreDelete(instance->mutex);
-        return ret;
+        goto cleanup;
     }
     
     // Configure GPIO pull-up for reliability
@@ -145,12 +149,19 @@ esp_err_t ld2450_init(const ld2450_config_t *config)
     }
     
     return ESP_OK;
+
+cleanup:
+    // Clean up resources in reverse order of allocation
+    if (instance->mutex) {
+        vSemaphoreDelete(instance->mutex);
+        instance->mutex = NULL;
+    }
+    ld2450_circular_buffer_deinit(&instance->circular_buffer);
+    return ret;
 }
 
 /**
  * @brief Deinitialize the LD2450 radar driver and release resources
- * 
- * @return esp_err_t ESP_OK on success, error code otherwise
  */
 esp_err_t ld2450_deinit(void)
 {
@@ -178,6 +189,9 @@ esp_err_t ld2450_deinit(void)
         instance->task_handle = NULL;
     }
     
+    // Deinitialize circular buffer
+    ld2450_circular_buffer_deinit(&instance->circular_buffer);
+    
     // Delete UART driver
     uart_driver_delete(instance->uart_port);
     
@@ -196,13 +210,41 @@ esp_err_t ld2450_deinit(void)
 }
 
 /**
- * @brief Register a callback function for target data
- * 
- * @param callback Function pointer to call when new target data is available
- * @param user_ctx User context pointer passed to the callback function
- * @return esp_err_t ESP_OK on success, error code otherwise
+ * @brief Register as a consumer of radar data
  */
-esp_err_t ld2450_register_target_callback(ld2450_target_cb_t callback, void *user_ctx)
+esp_err_t ld2450_register_consumer(ld2450_consumer_handle_t *handle)
+{
+    ld2450_state_t *instance = ld2450_get_instance();
+    
+    if (!instance->initialized || !handle) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    // Use current task as consumer
+    TaskHandle_t task_handle = xTaskGetCurrentTaskHandle();
+    if (task_handle == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    // Register with circular buffer
+    uint32_t consumer_id;
+    esp_err_t ret = ld2450_circular_buffer_register_consumer(
+        &instance->circular_buffer,
+        task_handle,
+        &consumer_id
+    );
+    
+    if (ret == ESP_OK) {
+        *handle = consumer_id;
+    }
+    
+    return ret;
+}
+
+/**
+ * @brief Unregister as a consumer of radar data
+ */
+esp_err_t ld2450_unregister_consumer(ld2450_consumer_handle_t handle)
 {
     ld2450_state_t *instance = ld2450_get_instance();
     
@@ -210,25 +252,71 @@ esp_err_t ld2450_register_target_callback(ld2450_target_cb_t callback, void *use
         return ESP_ERR_INVALID_STATE;
     }
     
-    if (xSemaphoreTake(instance->mutex, portMAX_DELAY) == pdTRUE) {
-        instance->target_callback = callback;
-        instance->user_ctx = user_ctx;
-        xSemaphoreGive(instance->mutex);
-        
-        ESP_LOGI(TAG, "Target callback %sregistered", callback ? "" : "un");
-        return ESP_OK;
+    return ld2450_circular_buffer_unregister_consumer(
+        &instance->circular_buffer,
+        handle
+    );
+}
+
+/**
+ * @brief Wait for a new radar frame with timeout
+ */
+esp_err_t ld2450_wait_for_frame(ld2450_consumer_handle_t handle, 
+                               ld2450_frame_t *frame, 
+                               uint32_t timeout_ms)
+{
+    ld2450_state_t *instance = ld2450_get_instance();
+    
+    if (!instance->initialized || !frame) {
+        return ESP_ERR_INVALID_STATE;
     }
     
-    return ESP_FAIL;
+    // First try to get latest frame without waiting
+    esp_err_t ret = ld2450_get_latest_frame(handle, frame);
+    if (ret == ESP_OK) {
+        return ESP_OK;
+    } else if (ret != ESP_ERR_NOT_FOUND) {
+        return ret;  // Return actual error
+    }
+    
+    // Wait for notification with timeout
+    uint32_t notification;
+    BaseType_t result = xTaskNotifyWait(
+        0,                  // Don't clear bits on entry
+        LD2450_NOTIFY_NEW_FRAME,  // Clear the notification bit on exit
+        &notification,      // Store notification value
+        pdMS_TO_TICKS(timeout_ms)
+    );
+    
+    if (result == pdFALSE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    
+    // If we got notified, read the latest frame
+    return ld2450_get_latest_frame(handle, frame);
+}
+
+/**
+ * @brief Get the latest radar frame without waiting
+ */
+esp_err_t ld2450_get_latest_frame(ld2450_consumer_handle_t handle, 
+                                 ld2450_frame_t *frame)
+{
+    ld2450_state_t *instance = ld2450_get_instance();
+    
+    if (!instance->initialized || !frame) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    return ld2450_circular_buffer_read_latest(
+        &instance->circular_buffer,
+        handle,
+        frame
+    );
 }
 
 /**
  * @brief Process a radar data frame manually
- * 
- * @param data Raw frame data buffer
- * @param length Length of the data buffer in bytes
- * @param frame Pointer to frame structure to store parsed results
- * @return esp_err_t ESP_OK on success, error code otherwise
  */
 esp_err_t ld2450_process_frame(const uint8_t *data, size_t length, ld2450_frame_t *frame)
 {
@@ -246,10 +334,6 @@ esp_err_t ld2450_process_frame(const uint8_t *data, size_t length, ld2450_frame_
 
 /**
  * @brief Processing task for radar data
- * 
- * This task continuously processes UART events to handle incoming radar data.
- * 
- * @param arg Task argument (not used)
  */
 void ld2450_processing_task(void *arg)
 {
@@ -335,19 +419,4 @@ void ld2450_processing_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/* 
- * The following functions are implemented in ld2450_config.c and are already declared
- * in ld2450.h. We don't need to re-implement them here, as they are accessible through
- * the public API header.
- * 
- * - ld2450_set_tracking_mode
- * - ld2450_get_tracking_mode
- * - ld2450_get_firmware_version
- * - ld2450_set_baud_rate
- * - ld2450_restore_factory_settings
- * - ld2450_restart_module
- * - ld2450_set_bluetooth
- * - ld2450_get_mac_address
- * - ld2450_set_region_filter
- * - ld2450_get_region_filter
- */
+// Configuration functions remain in ld2450_config.c
