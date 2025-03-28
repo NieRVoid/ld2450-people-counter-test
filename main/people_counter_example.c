@@ -186,9 +186,21 @@ void app_main(void) {
     
     // Clean up before exiting
     ESP_LOGI(TAG, "Exiting program...");
-    gpio_isr_handler_remove(BOOT_BUTTON_GPIO);
+    
+    // First stop any data producers and unregister consumers in proper order
     ld2450_unregister_consumer(g_radar_consumer);
+    
+    // Add a significant delay to ensure no more data flowing through the system
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    // Then stop consumers
     people_counter_deinit();
+    
+    // Add another significant delay to ensure complete cleanup
+    vTaskDelay(pdMS_TO_TICKS(300));
+    
+    // Free any remaining resources
     ld2450_deinit();
-    ESP_LOGI(TAG, "Cleanup complete, goodbye!");
+    
+    ESP_LOGI(TAG, "Program exited successfully");
 }

@@ -152,19 +152,19 @@ esp_err_t people_counter_deinit(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Stop the task
+    ESP_LOGI(TAG, "People counter task stopping");
+    
+    // Set the running flag to false before any other operations
     s_pc_context.running = false;
     
-    // Give task time to exit cleanly
-    if (s_pc_context.task_handle != NULL) {
-        // Unblock any waiting operations
-        xTaskNotify(s_pc_context.task_handle, 0, eNoAction);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        vTaskDelete(s_pc_context.task_handle);
-        s_pc_context.task_handle = NULL;
-    }
-
-    // Unregister consumer
+    // Wait for task to properly exit its main loop (longer timeout)
+    vTaskDelay(pdMS_TO_TICKS(300));
+    
+    // Don't attempt to delete the task - let it exit on its own
+    // Just mark the handle as NULL to prevent any further access
+    s_pc_context.task_handle = NULL;
+    
+    // Unregister consumer - safe to do after task stopped
     if (s_pc_context.consumer_handle != 0) {
         ld2450_unregister_consumer(s_pc_context.consumer_handle);
         s_pc_context.consumer_handle = 0;
@@ -538,5 +538,7 @@ static void people_counter_task(void *pvParameters)
     }
     
     ESP_LOGI(TAG, "People counter task stopped");
+    
+    // Delete self without using the task handle that might be accessed by deinit
     vTaskDelete(NULL);
 }
