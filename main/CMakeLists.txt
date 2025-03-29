@@ -4,7 +4,8 @@ idf_component_register(
     INCLUDE_DIRS 
         "."
     REQUIRES 
-        nvs_flash 
+        nvs_flash
+        esp_netif
         driver 
         esp_timer 
         console 
