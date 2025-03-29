@@ -7,6 +7,7 @@
  * - Showing people counter statistics every 10 seconds
  * - Receiving immediate notifications on count changes
  * - Clean exit on boot button press
+ * - Resource monitoring every 30 seconds
  */
 
 #include <stdio.h>
@@ -20,6 +21,7 @@
 #include "esp_timer.h"
 #include "people_counter.h"
 #include "ld2450.h"
+#include "resource_monitor.h"
 
 static const char *TAG = "PC_EXAMPLE";
 
@@ -157,6 +159,21 @@ void app_main(void) {
         return;
     }
     
+    // Initialize resource monitor
+    ESP_LOGI(TAG, "Initializing resource monitor...");
+    esp_err_t res_monitor_err = resource_monitor_init();
+    if (res_monitor_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize resource monitor: %s", esp_err_to_name(res_monitor_err));
+    } else {
+        // Start periodic resource monitoring (every 30 seconds)
+        res_monitor_err = resource_monitor_start_periodic(30000);
+        if (res_monitor_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start periodic resource monitoring: %s", esp_err_to_name(res_monitor_err));
+        } else {
+            ESP_LOGI(TAG, "Resource monitoring started with 30s interval");
+        }
+    }
+    
     // Initialize timestamps
     int64_t current_time = esp_timer_get_time();
     g_last_radar_display_time = current_time;
@@ -198,6 +215,10 @@ void app_main(void) {
     
     // Add another significant delay to ensure complete cleanup
     vTaskDelay(pdMS_TO_TICKS(300));
+    
+    // Stop and deinitialize resource monitor before exit
+    resource_monitor_stop_periodic();
+    resource_monitor_deinit();
     
     // Free any remaining resources
     ld2450_deinit();
