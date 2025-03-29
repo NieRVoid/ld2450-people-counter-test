@@ -6,20 +6,40 @@
  * extracting target information and calculating derived metrics.
  * 
  * @author NieRVoid
- * @date 2025-03-12
+ * @date 2025-03-15
  * @license MIT
  */
 
 #include <string.h>
 #include <math.h>
-#include "esp_timer.h"
 #include "ld2450.h"
 #include "ld2450_private.h"
+#include "ld2450_circular_buffer.h"
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
 static const char *TAG = LD2450_LOG_TAG;
+
+/**
+ * @brief Compress a raw speed value (int16_t) to a scaled int8_t representation
+ * 
+ * Maps the original speed value to int8_t range using the formula: 
+ * (magnitude >> 3) + (magnitude >> 5) to approximate (magnitude * 128) / 1000
+ * 
+ * @param speed_raw Original speed value from radar
+ * @return int8_t Compressed speed value
+ */
+static inline int8_t compress_speed(uint16_t speed_raw) {
+    // Extract the 15-bit magnitude
+    int16_t magnitude = speed_raw & 0x7FFF;
+    
+    // Apply the compression formula: ~= (magnitude * 128) / 1000
+    int8_t compressed = (magnitude >> 3) + (magnitude >> 5);
+    
+    // Apply sign based on MSB of original value
+    return (speed_raw & 0x8000) ? compressed : -compressed;
+}
 
 /**
  * @brief Parse target data from a data segment within a frame
@@ -30,46 +50,32 @@ static const char *TAG = LD2450_LOG_TAG;
  */
 static bool parse_target(const uint8_t *target_data, ld2450_target_t *target)
 {
-    // Check if target segment is empty (all zeros)
-    bool is_empty = true;
-    for (int i = 0; i < 8; i++) {
-        if (target_data[i] != 0) {
-            is_empty = false;
-            break;
-        }
-    }
-    
-    if (is_empty) {
-        target->valid = false;
+    // Check if target segment is empty (all zeros) using faster 32-bit checks
+    uint32_t *data32 = (uint32_t*)target_data;
+    if (data32[0] == 0 && data32[1] == 0) {
         return false;
     }
     
     // Parse target data according to protocol
-    const int16_t num = 1 << 15; // 32768
-    
     // X coordinate (little-endian)
     uint16_t x_raw = target_data[0] | (target_data[1] << 8);
     // Y coordinate (little-endian)
     uint16_t y_raw = target_data[2] | (target_data[3] << 8);
     // Speed (little-endian)
     uint16_t speed_raw = target_data[4] | (target_data[5] << 8);
-    // Distance resolution (little-endian)
-    uint16_t dist_res_raw = target_data[6] | (target_data[7] << 8);
     
     // Convert coordinates according to protocol
-    // For X: if MSB is 1, value = raw - 32768; if MSB is 0, value = -raw
-    target->x = (target_data[1] & 0x80) ? (x_raw - num) : -x_raw;
-    // For Y: value = raw - 32768 (always subtract)
-    target->y = y_raw - num;
-    // For speed: if MSB is 1, value = raw - 32768; if MSB is 0, value = -raw
-    target->speed = (target_data[5] & 0x80) ? (speed_raw - num) : -speed_raw;
-    // Distance resolution is used directly
-    target->resolution = dist_res_raw;
+    // For X, Y, Speed: MSB 1 indicates positive, 0 indicates negative
+    // Handle the 15-bit magnitude with proper sign
+    int16_t x_magnitude = x_raw & 0x7FFF;  // Mask off MSB to get magnitude (15 bits)
+    int16_t y_magnitude = y_raw & 0x7FFF;  // Mask off MSB to get magnitude (15 bits)
     
-    // Calculate derived values
-    target->distance = sqrt(target->x * target->x + target->y * target->y);
-    target->angle = -atan2((float)target->x, (float)target->y) * (180.0f / M_PI);
-    target->valid = true;
+    // Apply sign based on MSB
+    target->x = (target_data[1] & 0x80) ? x_magnitude : -x_magnitude;
+    target->y = (target_data[3] & 0x80) ? y_magnitude : -y_magnitude;
+    
+    // Compress speed to int8_t using custom compression formula
+    target->speed = compress_speed(speed_raw);
     
     return true;
 }
@@ -96,11 +102,8 @@ esp_err_t ld2450_parse_frame(const uint8_t *data, size_t len, ld2450_frame_t *fr
         return ESP_ERR_INVALID_STATE;
     }
     
-    // Reset target count
-    frame->count = 0;
-    
-    // Get current timestamp
-    frame->timestamp = esp_timer_get_time();
+    // Reset valid mask
+    frame->valid_mask = 0;
     
     // Parse up to 3 targets
     for (int i = 0; i < 3; i++) {
@@ -109,14 +112,13 @@ esp_err_t ld2450_parse_frame(const uint8_t *data, size_t len, ld2450_frame_t *fr
         
         // Parse target data
         if (parse_target(target_data, &frame->targets[i])) {
-            frame->count++;
+            // Set the corresponding bit in the valid mask
+            frame->valid_mask |= (1 << i);
         } else {
             // Clear the target data for invalid targets
             memset(&frame->targets[i], 0, sizeof(ld2450_target_t));
         }
     }
-    
-    ESP_LOGD(TAG, "Parsed frame with %d targets", frame->count);
     
     return ESP_OK;
 }
@@ -125,7 +127,7 @@ esp_err_t ld2450_parse_frame(const uint8_t *data, size_t len, ld2450_frame_t *fr
  * @brief Handle a complete data frame
  * 
  * This function processes a complete data frame, parses it, and delivers
- * the results to the registered callback if any.
+ * the results to the circular buffer for consumers.
  * 
  * @param data Frame data
  * @param len Frame length
@@ -154,12 +156,8 @@ esp_err_t ld2450_handle_data_frame(const uint8_t *data, size_t len)
         return ret;
     }
     
-    // Call the callback if registered
-    if (instance->target_callback != NULL) {
-        instance->target_callback(&frame, instance->user_ctx);
-    }
-    
-    return ESP_OK;
+    // Write frame to circular buffer for multi-consumer access
+    return ld2450_circular_buffer_write(&instance->circular_buffer, &frame);
 }
 
 /**
@@ -256,95 +254,50 @@ esp_err_t ld2450_process_data(const uint8_t *data, size_t len)
 }
 
 /**
- * @brief UART event handler
+ * @brief UART event handler for batch processing of incoming data
  * 
- * This function is called when UART events occur and processes incoming data.
- * 
- * @param arg UART event data
+ * @param data_buffer Buffer containing UART data
+ * @param len Length of data in the buffer
  */
-void ld2450_uart_event_handler(void *arg)
+void ld2450_uart_event_handler(uint8_t *data_buffer, size_t len)
 {
     ld2450_state_t *instance = ld2450_get_instance();
-    uart_event_t event;
     
     if (!instance || !instance->initialized) {
         return;
     }
     
-    static uint8_t data_buffer[LD2450_UART_RX_BUF_SIZE];
+    // Skip data processing if we're in config mode
+    if (instance->in_config_mode) {
+        ESP_LOGV(TAG, "Skipping data processing while in config mode");
+        return;
+    }
     
-    // Process UART events
-    if (xQueueReceive(instance->uart_queue, &event, 0)) {
-        switch (event.type) {
-            case UART_DATA:
-            {
-                // Read data from UART
-                int len = uart_read_bytes(instance->uart_port, data_buffer, 
-                                         MIN(event.size, LD2450_UART_RX_BUF_SIZE),
-                                         pdMS_TO_TICKS(100));
-                
-                if (len > 0) {
-                    // Process the received data
-                    ld2450_process_data(data_buffer, len);
+    // Process multiple bytes at once using state machine approach
+    for (int i = 0; i < len; i++) {
+        if (!instance->frame_synced) {
+            // Use efficient header detection with 4 consecutive bytes
+            if (i <= len - 4) {
+                if (memcmp(&data_buffer[i], LD2450_DATA_FRAME_HEADER, 4) == 0) {
+                    instance->frame_synced = true;
+                    memcpy(instance->frame_buffer, LD2450_DATA_FRAME_HEADER, 4);
+                    instance->frame_idx = 4;
+                    i += 3; // Skip the remaining header bytes
                 }
-                break;
             }
+        } else if (instance->frame_idx < LD2450_DATA_FRAME_SIZE) {
+            instance->frame_buffer[instance->frame_idx++] = data_buffer[i];
             
-            case UART_FIFO_OVF:
-                ESP_LOGW(TAG, "UART FIFO overflow, clearing FIFO");
-                uart_flush(instance->uart_port);
-                break;
-                
-            case UART_BUFFER_FULL:
-                ESP_LOGW(TAG, "UART buffer full, clearing buffer");
-                uart_flush(instance->uart_port);
-                break;
-                
-            case UART_BREAK:
-                ESP_LOGW(TAG, "UART break detected");
-                break;
-                
-            case UART_PARITY_ERR:
-                ESP_LOGW(TAG, "UART parity error");
-                break;
-                
-            case UART_FRAME_ERR:
-                ESP_LOGW(TAG, "UART frame error");
-                break;
-                
-            default:
-                ESP_LOGW(TAG, "UART event %d", event.type);
-                break;
+            // Process complete frame
+            if (instance->frame_idx == LD2450_DATA_FRAME_SIZE) {
+                // Validate footer
+                if (memcmp(instance->frame_buffer + LD2450_DATA_FRAME_SIZE - 2, 
+                           LD2450_DATA_FRAME_FOOTER, 2) == 0) {
+                    ld2450_handle_data_frame(instance->frame_buffer, LD2450_DATA_FRAME_SIZE);
+                }
+                instance->frame_synced = false;
+                instance->frame_idx = 0;
+            }
         }
     }
-}
-
-/**
- * @brief Processing task for radar data
- * 
- * This task continuously processes UART events to handle incoming radar data.
- * 
- * @param arg Task argument (not used)
- */
-void ld2450_processing_task(void *arg)
-{
-    ld2450_state_t *instance = ld2450_get_instance();
-    
-    if (!instance || !instance->initialized) {
-        vTaskDelete(NULL);
-        return;
-    }
-    
-    ESP_LOGI(TAG, "LD2450 processing task started");
-    
-    while (instance->initialized) {
-        // Process UART events
-        ld2450_uart_event_handler(NULL);
-        
-        // Short delay to yield CPU
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
-    
-    ESP_LOGI(TAG, "LD2450 processing task stopped");
-    vTaskDelete(NULL);
 }

@@ -1,6 +1,17 @@
 idf_component_register(
-    SRCS "people_counter_example.c"
-    INCLUDE_DIRS ""
-    REQUIRES nvs_flash driver esp_timer console ld2450_driver people_counter
-    PRIV_REQUIRES spi_flash
+    SRCS 
+        "people_counter_example.c"
+    INCLUDE_DIRS 
+        "."
+    REQUIRES 
+        nvs_flash
+        esp_netif
+        driver 
+        esp_timer 
+        console 
+        ld2450_driver 
+        people_counter 
+        resource_monitor
+    PRIV_REQUIRES 
+        spi_flash
 )

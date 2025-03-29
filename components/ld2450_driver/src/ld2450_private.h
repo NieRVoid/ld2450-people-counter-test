@@ -7,7 +7,7 @@
  * by applications.
  * 
  * @author NieRVoid
- * @date 2025-03-12
+ * @date 2025-03-15
  * @license MIT
  */
 
@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "ld2450.h"
+#include "ld2450_circular_buffer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -45,11 +46,14 @@ extern "C" {
 /** @brief Timeout for module restart in milliseconds */
 #define LD2450_RESTART_TIMEOUT_MS 3000
 
-/** @brief Size of the UART RX buffer (replaces CONFIG_LD2450_UART_RX_BUF_SIZE) */
-#define LD2450_UART_RX_BUF_SIZE 512
+/** @brief Size of the UART RX buffer */
+#define LD2450_UART_RX_BUF_SIZE 1024  // Increased from 512
 
 /** @brief Stack size for the processing task (replaces CONFIG_LD2450_TASK_STACK_SIZE) */
 #define LD2450_TASK_STACK_SIZE 4096
+
+/** @brief Error debug data buffer size */
+#define LD2450_ERROR_BUFFER_SIZE 256
 
 /** @brief MIN macro for getting minimum of two values */
 #ifndef MIN
@@ -67,6 +71,14 @@ static const uint8_t LD2450_DATA_FRAME_FOOTER[] = {0x55, 0xCC};
 static const uint8_t LD2450_CONFIG_FRAME_HEADER[] = {0xFD, 0xFC, 0xFB, 0xFA};
 /** @brief Config frame footer (0x04, 0x03, 0x02, 0x01) */
 static const uint8_t LD2450_CONFIG_FRAME_FOOTER[] = {0x04, 0x03, 0x02, 0x01};
+
+/**
+ * @brief Union for efficient frame header detection
+ */
+typedef union {
+    uint32_t value;
+    uint8_t bytes[4];
+} frame_header_t;
 
 /**
  * @brief Command words defined in the protocol
@@ -116,10 +128,8 @@ typedef struct {
     bool initialized;
     /** @brief Auto-processing enabled flag */
     bool auto_processing;
-    /** @brief Target data callback function */
-    ld2450_target_cb_t target_callback;
-    /** @brief User context for callback */
-    void *user_ctx;
+    /** @brief Circular buffer for multi-consumer data sharing */
+    ld2450_circular_buffer_t circular_buffer;
     /** @brief Processing task handle */
     TaskHandle_t task_handle;
     /** @brief UART event queue */
@@ -138,6 +148,10 @@ typedef struct {
     uint16_t frame_idx;
     /** @brief Frame synchronization state */
     bool frame_synced;
+    uint32_t idle_count;  // Counter for adaptive task delay
+    /** @brief Error debug data */
+    uint8_t error_buffer[LD2450_ERROR_BUFFER_SIZE];
+    size_t error_buffer_len;
 } ld2450_state_t;
 
 /**
@@ -192,9 +206,10 @@ void ld2450_processing_task(void *arg);
 /**
  * @brief UART event handler
  * 
- * @param event UART event data
+ * @param data_buffer Buffer containing UART data
+ * @param len Length of data in the buffer
  */
-void ld2450_uart_event_handler(void *arg);
+void ld2450_uart_event_handler(uint8_t *data_buffer, size_t len);
 
 /**
  * @brief Get driver instance (singleton)
